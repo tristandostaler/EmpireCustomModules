@@ -135,11 +135,13 @@ function Set-AutomaticallyDetectProxySettings ($enable)
   
     # Bit inside the relevant flag which indicates whether or not to enable automatically detect proxy settings. 
     $autoProxyFlag = 8 
-  
+
+    $wasEnabled = $False
     if ($enable) 
     { 
          if ($($conSet[$flagIndex] -band $autoProxyFlag) -eq $autoProxyFlag) 
         { 
+            $wasEnabled = $True
         } 
         else 
         { 
@@ -153,13 +155,14 @@ function Set-AutomaticallyDetectProxySettings ($enable)
     { 
         if ($($conSet[$flagIndex] -band $autoProxyFlag) -eq $autoProxyFlag) 
         { 
-            # 'Automatically detect proxy settings' was enabled, adding one disables it. 
+            # 'Automatically detect proxy settings' was enabled, adding one disables it.
+            $wasEnabled = $True 
             Write-Host "Disabling 'Automatically detect proxy settings'." 
             $mask = -bnot $autoProxyFlag 
              $conSet[$flagIndex] = $conSet[$flagIndex] -band $mask 
             $conSet[4]++ 
             Set-ItemProperty -Path $regKeyPath -Name DefaultConnectionSettings -Value $conSet 
-        } 
+        }
     }
 
      $conSet = $(Get-ItemProperty $regKeyPath).DefaultConnectionSettings 
@@ -171,6 +174,7 @@ function Set-AutomaticallyDetectProxySettings ($enable)
         { 
             Write-Host "'Automatically detect proxy settings' is enabled." 
         } 
+    return $wasEnabled
 }
 function Start-CertificateAuthority()
 {
@@ -490,6 +494,7 @@ function Send-ServerHttpRequest([string] $URI, [string] $httpMethod,[byte[]] $re
 		$request.Method = $httpMethod
 		$request.AllowAutoRedirect = $false 
 		$request.AutomaticDecompression = [System.Net.DecompressionMethods]::None
+        $request.Timeout = 30000
 	
 		For ($i = 1; $i -le $requestString.Length; $i++)
 		{
@@ -664,29 +669,43 @@ function Receive-ClientHttpRequest([System.Net.Sockets.TcpClient] $client, [Syst
 
 #https://martin.hoppenheit.info/blog/2015/set-windows-proxy-with-powershell/
 function SetSystemWideProxy([int] $port){
-    Write-Host "Adding system wide proxy"
-    $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-    $settings = Get-ItemProperty -Path $reg
-    $backup = $null
-    if($settings.ProxyEnable)
+    try
     {
-        Write-Host "Present proxy server: " $settings.ProxyServer
-        $backup = $settings.ProxyServer
+        Write-Host "Adding system wide proxy"
+        $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        $settings = Get-ItemProperty -Path $reg
+        $backup = $null
+        if($settings.ProxyEnable)
+        {
+            Write-Host "Present proxy server: " $settings.ProxyServer
+            $backup = $settings.ProxyServer
+        }
+        Set-ItemProperty -Path $reg -Name ProxyServer -Value "localhost:$port"
+        Set-ItemProperty -Path $reg -Name ProxyEnable -Value 1
+        return $backup
     }
-    Set-ItemProperty -Path $reg -Name ProxyServer -Value "localhost:$port"
-    Set-ItemProperty -Path $reg -Name ProxyEnable -Value 1
-    return $backup
+    catch
+    {
+        Write-Verbose $_.Exception.Message
+    }
 }
 
 function UnsetSystemWideProxy([string] $backup){
-    Write-Host "Removing system wide proxy"
-    $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
-    Set-ItemProperty -Path $reg -Name ProxyEnable -Value 0
-    Remove-ItemProperty -Path $reg -Name ProxyServer
-    if(![string]::IsNullOrEmpty($backup)){
-        Write-Host "Reinstalling old proxy: " $backup
-        Set-ItemProperty -Path $reg -Name ProxyServer -Value $backup
-        Set-ItemProperty -Path $reg -Name ProxyEnable -Value 1
+    try
+    {
+        Write-Host "Removing system wide proxy"
+        $reg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+        Set-ItemProperty -Path $reg -Name ProxyEnable -Value 0
+        Remove-ItemProperty -Path $reg -Name ProxyServer
+        if(![string]::IsNullOrEmpty($backup)){
+            Write-Host "Reinstalling old proxy: " $backup
+            Set-ItemProperty -Path $reg -Name ProxyServer -Value $backup
+            Set-ItemProperty -Path $reg -Name ProxyEnable -Value 1
+        }
+    }
+    catch
+    {
+        Write-Verbose $_.Exception.Message
     }
 }
 
@@ -761,18 +780,22 @@ function Main()
 	netsh advfirewall firewall delete rule name="Interceptor Proxy $port" | Out-Null #First Run May Throw Error...Thats Ok..:)
 	netsh advfirewall firewall add rule name="Interceptor Proxy $port" dir=in action=allow protocol=TCP localport=$port | Out-Null
 	
+    $backup = $null
+    $wasEnabled = $False
+
 	if($AutoProxyConfig)
 	{
 		#TODO - Map Existing Proxy Settings, for transparent upstream chaining
 		# 
-		$proxyServerToDefine = "localhost:$port"
+		#$proxyServerToDefine = "localhost:$port"
 
-		$regKey="HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" 
+		#$regKey="HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings" 
 		
-		Set-AutomaticallyDetectProxySettings ($false) 
+		$wasEnabled = Set-AutomaticallyDetectProxySettings ($false) 
 			
-		Set-ItemProperty -path $regKey ProxyEnable -value 1 
-		Set-ItemProperty -path $regKey ProxyServer -value $proxyServerToDefine 
+		#Set-ItemProperty -path $regKey ProxyEnable -value 1 
+		#Set-ItemProperty -path $regKey ProxyServer -value $proxyServerToDefine 
+        $backup = SetSystemWideProxy $port
 		Write-Host "Proxy is now enabled" 
 		 
 	}
@@ -807,7 +830,6 @@ function Main()
 		[Console]::WriteLine("Using Direct Internet Connection")
 	}
 	
-    $backup = SetSystemWideProxy $port
     try
     {
         
@@ -825,17 +847,17 @@ function Main()
 		        {
 			        Receive-ClientHttpRequest $client $proxy
 		        }
-            }
-            #else
-            #{
-            #    Start-Sleep -s 1
-            #}
-		
+            }		
 	    }
     }
     finally {
 	    $listener.Stop();
-        UnsetSystemWideProxy $backup
+        if($AutoProxyConfig)
+        {
+            UnsetSystemWideProxy $backup
+            Set-AutomaticallyDetectProxySettings ($wasEnabled)
+            Write-Host "Proxy is now disabled"
+        }
     }
 }
 
